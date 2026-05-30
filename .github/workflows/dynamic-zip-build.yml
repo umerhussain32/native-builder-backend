@@ -1,0 +1,133 @@
+name: Ultimate Dynamic User Android Cloud Compiler
+on:
+  workflow_dispatch:
+    inputs:
+      buildId:
+        required: true
+        description: 'Tracking identifier emitted from frontend'
+      appName:
+        required: true
+        description: 'The visible display name of the application'
+      packageName:
+        required: true
+        description: 'The Android namespace package identity (e.g., com.example.appname)'
+      projectZipBase64:
+        required: true
+        description: 'The entire app code folder containing an assets folder inside compressed as Base64'
+      hasKeystore:
+        required: true
+        default: 'false'
+        description: 'Set to "true" if user provides a keystore, "false" to auto-generate a new one'
+      keystoreBase64:
+        required: false
+        default: ''
+        description: 'The users existing .jks or .keystore file encoded as a Base64 string'
+      keystorePassword:
+        required: true
+        description: 'Password for the custom or newly generated keystore'
+      keyAlias:
+        required: true
+        description: 'Alias of the key inside the keystore'
+      keyPassword:
+        required: true
+        description: 'Password for the specific key alias'
+      targetBuildType:
+        required: true
+        default: 'apk'
+        description: 'Build format option: apk or aab'
+
+jobs:
+  ultimate_compile:
+    name: Automated App Builder Engine
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Clean Workspace Environment
+        uses: actions/checkout@v4
+
+      - name: Initialize Node.js Runtime Engine
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java Development Kit (JDK)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK Environment Tooling
+        uses: android-actions/setup-android@v3
+
+      - name: Reconstruct User Project Directory from Zip Stream
+        run: |
+          echo "${{ github.event.inputs.projectZipBase64 }}" | base64 -d > user-incoming-project.zip
+          unzip -o user-incoming-project.zip -d ./user-project
+          
+          # Move automation helper scripts inside the unzipped workspace
+          cp parse-build-payload.js ./user-project/
+          cp compile-gradle.sh ./user-project/
+
+      - name: Handle Cryptographic Keystore Layer
+        run: |
+          cd user-project
+          if [ "${{ github.event.inputs.hasKeystore }}" = "true" ]; then
+            echo "[Keystore Engine] Decoding existing user keystore..."
+            echo "${{ github.event.inputs.keystoreBase64 }}" | base64 -d > user-signing-key.jks
+          else
+            echo "[Keystore Engine] No keystore provided. Auto-generating a secure new key..."
+            keytool -genkeypair -v \
+              -keystore user-signing-key.jks \
+              -alias "${{ github.event.inputs.keyAlias }}" \
+              -keypass "${{ github.event.inputs.keyPassword }}" \
+              -storepass "${{ github.event.inputs.keystorePassword }}" \
+              -dname "CN=CloudBuilder, OU=MobileDev, O=Autonomous, L=Default, S=Default, C=US" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000
+          fi
+
+      - name: Process Custom Configuration and Asset Paths
+        run: |
+          cd user-project
+          node parse-build-payload.js
+        env:
+          APP_NAME: ${{ github.event.inputs.appName }}
+          PACKAGE_NAME: ${{ github.event.inputs.packageName }}
+          KEYSTORE_PASS: ${{ github.event.inputs.keystorePassword }}
+          KEY_ALIAS: ${{ github.event.inputs.keyAlias }}
+          KEY_PASS: ${{ github.event.inputs.keyPassword }}
+
+      - name: Install Dependencies & Run Expo Prebuild
+        run: |
+          cd user-project
+          npm install
+          npx expo prebuild --platform android --no-install
+          
+          # Force inject the newly created or decoded keystore directly into the native app directory
+          mv user-signing-key.jks android/app/release-key.jks
+
+      - name: Compile and Sign Binary via Local Gradle Engine
+        run: |
+          cd user-project
+          chmod +x compile-gradle.sh
+          ./compile-gradle.sh ${{ github.event.inputs.targetBuildType }}
+        env:
+          MYAPP_RELEASE_STORE_PASSWORD: ${{ github.event.inputs.keystorePassword }}
+          MYAPP_RELEASE_KEY_ALIAS: ${{ github.event.inputs.keyAlias }}
+          MYAPP_RELEASE_KEY_PASSWORD: ${{ github.event.inputs.keyPassword }}
+
+      - name: Upload Signed Target Production Binary Deliverable
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-application-${{ github.event.inputs.buildId }}
+          path: |
+            user-project/android/app/build/outputs/apk/release/app-release.apk
+            user-project/android/app/build/outputs/bundle/release/app-release.aab
+          retention-days: 5
+
+      - name: Return Keystore File Back to User
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-keystore-${{ github.event.inputs.buildId }}
+          path: user-project/android/app/release-key.jks
+          retention-days: 5
